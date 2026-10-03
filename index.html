@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#090909">
+<title>ECHO — QR Magic</title>
+<style>
+  :root{--bg:#090909;--fg:#f4f4f4;--muted:#8c8c8c;--card:#151515;--line:#292929;}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Arial,sans-serif;min-height:100%}
+  body{display:flex;justify-content:center}
+  main{width:min(100%,520px);min-height:100vh;padding:26px 18px 40px;display:flex;flex-direction:column}
+  .brand{letter-spacing:.28em;font-size:11px;color:#bbb;margin-bottom:28px;text-align:center}
+  h1{font-size:31px;line-height:1.05;margin:0 0 12px;text-align:center;font-weight:700}
+  p{color:var(--muted);line-height:1.45;text-align:center;margin:0 auto 24px;max-width:390px}
+  button{font:inherit;color:var(--fg);background:#fff;color:#000;border:0;border-radius:15px;padding:15px 18px;font-weight:700;font-size:16px;cursor:pointer;width:100%}
+  button.secondary{background:#1b1b1b;color:#fff;border:1px solid var(--line)}
+  button:disabled{opacity:.5}
+  .screen{display:none;flex:1;flex-direction:column}
+  .screen.active{display:flex}
+  .spacer{flex:1}
+  .camera-wrap{position:relative;background:#000;border-radius:22px;overflow:hidden;aspect-ratio:3/4;margin-bottom:16px;border:1px solid var(--line)}
+  video{width:100%;height:100%;object-fit:cover;display:block;transform:scaleX(-1)}
+  .capture-dot{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);width:64px;height:64px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.55);box-shadow:0 0 0 2px #222}
+  .choice-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:10px 0 16px}
+  .choice{aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;background:var(--card);border:1px solid var(--line);border-radius:20px;font-size:56px;transition:.16s transform,.16s border-color;user-select:none}
+  .choice:active{transform:scale(.97)}
+  .hint{text-align:center;color:#707070;font-size:12px;margin:0 0 18px}
+  .result-shell{background:#000;border-radius:22px;overflow:hidden;border:1px solid var(--line);margin-bottom:14px}
+  canvas{width:100%;display:block;height:auto}
+  .result-title{font-size:15px;text-align:center;margin:0 0 8px;font-weight:650}
+  .small{font-size:12px}
+  .note{background:#111;border:1px solid #202020;padding:14px;border-radius:16px;color:#909090;font-size:12px;line-height:1.45;margin-bottom:14px}
+  .danger{color:#c8c8c8}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">ECHO / QR</div>
+
+  <section id="intro" class="screen active">
+    <div>
+      <h1>Algo ya estaba en la foto.</h1>
+      <p>Haz una fotografía primero. Después pensarás en uno de cuatro símbolos. La aplicación intentará encontrarlo en la fotografía.</p>
+      <div class="note">Prototipo de actuación: la cámara permanece en el dispositivo y la imagen se procesa en esta página. No se sube a un servidor.</div>
+    </div>
+    <div class="spacer"></div>
+    <button id="startBtn">Empezar</button>
+  </section>
+
+  <section id="camera" class="screen">
+    <h1>Primero, una foto.</h1>
+    <p class="small">Pon tu cara o la mesa como quieras. La foto se tomará antes de la elección.</p>
+    <div class="camera-wrap">
+      <video id="video" playsinline autoplay muted></video>
+      <button class="capture-dot" id="captureBtn" aria-label="Hacer fotografía"></button>
+    </div>
+    <button class="secondary" id="flipBtn">Cambiar cámara</button>
+  </section>
+
+  <section id="choose" class="screen">
+    <h1>No toques todavía.</h1>
+    <p>Quédate mirando los cuatro símbolos. Elige uno mentalmente. Cuando lo tengas claro, tócala.</p>
+    <div class="choice-grid">
+      <button class="choice" data-symbol="moon">☾</button>
+      <button class="choice" data-symbol="key">⌁</button>
+      <button class="choice" data-symbol="rose">✿</button>
+      <button class="choice" data-symbol="bolt">ϟ</button>
+    </div>
+    <div class="hint">La fotografía ya estaba hecha.</div>
+  </section>
+
+  <section id="reveal" class="screen">
+    <h1>Haz zoom.</h1>
+    <p>La imagen de arriba no se ha vuelto a tomar.</p>
+    <div class="result-shell"><canvas id="resultCanvas"></canvas></div>
+    <div class="note">El símbolo aparece como si formara parte de un reflejo sobre la escena. Para el primer prototipo se usa una composición gráfica; la V2 puede sustituirla por una integración fotográfica más realista.</div>
+    <button id="saveBtn">Guardar la imagen</button>
+    <div style="height:10px"></div>
+    <button class="secondary" id="againBtn">Hacer otra</button>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const screens = ['intro','camera','choose','reveal'].map($);
+  let stream = null;
+  let facingMode = 'user';
+  let sourceCanvas = null;
+  let chosen = null;
+
+  function show(id){
+    screens.forEach(s => s.classList.toggle('active', s.id === id));
+  }
+
+  async function startCamera(){
+    if (!navigator.mediaDevices?.getUserMedia) {
+      alert('Este navegador no permite usar la cámara desde esta página. Abre el enlace publicado por HTTPS en Safari o Chrome.');
+      return;
+    }
+    if(stream) stream.getTracks().forEach(t => t.stop());
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({video:{facingMode}, audio:false});
+      $('video').srcObject = stream;
+      show('camera');
+    }catch(err){
+      alert('Necesitas permitir el acceso a la cámara para esta versión.');
+    }
+  }
+
+  function makePhoto(){
+    const v = $('video');
+    if(!v.videoWidth) return;
+    sourceCanvas = document.createElement('canvas');
+    const maxW = 900;
+    const scale = Math.min(1, maxW / v.videoWidth);
+    sourceCanvas.width = Math.round(v.videoWidth * scale);
+    sourceCanvas.height = Math.round(v.videoHeight * scale);
+    const c = sourceCanvas.getContext('2d');
+    c.save();
+    if(facingMode === 'user'){
+      c.translate(sourceCanvas.width,0);
+      c.scale(-1,1);
+    }
+    c.drawImage(v,0,0,sourceCanvas.width,sourceCanvas.height);
+    c.restore();
+    if(stream) stream.getTracks().forEach(t => t.stop());
+    show('choose');
+  }
+
+  function drawReveal(symbol){
+    const out = $('resultCanvas');
+    const w = sourceCanvas.width, h = sourceCanvas.height;
+    out.width = w; out.height = h;
+    const ctx = out.getContext('2d');
+    ctx.drawImage(sourceCanvas,0,0);
+
+    // Subtle "glass/reflection" region in the upper-right third.
+    const cx = w*0.76, cy = h*0.28, r = Math.min(w,h)*0.17;
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx,cy,r,r*0.64,-0.25,0,Math.PI*2);
+    ctx.clip();
+    const g = ctx.createLinearGradient(cx-r,cy-r,cx+r,cy+r);
+    g.addColorStop(0,'rgba(255,255,255,0.00)');
+    g.addColorStop(.46,'rgba(255,255,255,0.07)');
+    g.addColorStop(.56,'rgba(255,255,255,0.21)');
+    g.addColorStop(1,'rgba(255,255,255,0.00)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cx-r,cy-r,cx+r*2,cy+r*2);
+    ctx.globalAlpha = .54;
+    ctx.shadowColor = 'rgba(255,255,255,.5)';
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = 'rgba(255,255,255,.70)';
+    ctx.lineWidth = Math.max(2,w/320);
+    drawSymbol(ctx,symbol,cx,cy,r*.72);
+    ctx.restore();
+
+    // Tiny glare so it doesn't look like a pasted icon.
+    ctx.save();
+    ctx.globalAlpha=.12;
+    ctx.translate(w*.69,h*.17);
+    ctx.rotate(-0.25);
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,w*.20,h*.008);
+    ctx.restore();
+  }
+
+  function drawSymbol(ctx,symbol,cx,cy,s){
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.font = `300 ${Math.round(s*1.15)}px Arial`;
+    const glyph = {moon:'☾', key:'⌁', rose:'✿', bolt:'ϟ'}[symbol];
+    ctx.fillStyle='rgba(255,255,255,.75)';
+    ctx.fillText(glyph,0,0);
+    ctx.restore();
+  }
+
+  $('startBtn').addEventListener('click', startCamera);
+  $('captureBtn').addEventListener('click', makePhoto);
+  $('flipBtn').addEventListener('click', async () => {
+    facingMode = facingMode === 'user' ? 'environment' : 'user';
+    await startCamera();
+  });
+
+  document.querySelectorAll('.choice').forEach(btn => btn.addEventListener('click', () => {
+    chosen = btn.dataset.symbol;
+    drawReveal(chosen);
+    setTimeout(() => show('reveal'), 450);
+  }));
+
+  $('saveBtn').addEventListener('click', () => {
+    $('resultCanvas').toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href=url; a.download='echo-revelacion.jpg';
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1500);
+    },'image/jpeg',.94);
+  });
+
+  $('againBtn').addEventListener('click', () => {
+    chosen=null; sourceCanvas=null; $('video').srcObject=null; show('intro');
+  });
+})();
+</script>
+</body>
+</html>
